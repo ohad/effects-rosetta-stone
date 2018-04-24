@@ -1,0 +1,71 @@
+effect Sample : float;;
+effect Score  : float -> unit;;
+
+(* bernoulli : float -> bool *)
+let bernoulli p =  (p < perform Sample);;
+
+let model() =
+  let rain      = bernoulli 0.2 in
+  let sprinkler = bernoulli 0.1 in
+  let log_liklihood_lawn_wet = match (rain, sprinkler) with
+                           | ( true , true ) -> 0.99
+                           | ( true , false) -> 0.70
+                           | ( false, true ) -> 0.90
+                           | ( false, false) -> 0.01 in
+  let _ = perform (Score log_liklihood_lawn_wet) in
+  rain;;
+
+let sampler = handler
+  | v -> v
+  | effect Sample k ->
+     k (perform (RandomFloat 1.));;
+
+let weighted = handler
+  | v -> fun r -> (r,v)
+  | effect (Score r1) k -> fun r2 -> k () (r2 +. r1)
+  | finally f -> f 0.
+;;
+
+effect Spark : int -> unit;;
+
+let list_handler = handler
+  | v -> [v]
+  | effect (Spark n) k ->
+      let rec loop i res =
+         if i < n
+         then loop (i+1) ((k ()) @ res)
+         else res
+      in loop 0 []
+;;
+
+let separate pred =
+  let rec loop holds fails = function
+  | [] -> (reverse holds, reverse fails)
+  | x :: rest -> if pred x
+                 then loop (x :: holds) fails rest
+                 else loop holds (x :: fails) rest
+  in loop [] []
+
+let rec foldl e f = function
+                    | [] -> e
+                    | x :: xs -> foldl (f e x) f xs
+;;
+
+let aggr rs =
+  let rec aggr_aux completed = function
+    | [] -> completed
+    | (r,x) :: todo -> let holds,fails = separate (fun (r,a) -> x = a) todo
+                       in aggr_aux ((foldl r (fun s (r,x) -> s +.r) holds,x) :: completed) fails
+  in aggr_aux [] rs
+;;
+
+aggr(
+  with list_handler handle
+  with sampler      handle
+  with weighted     handle
+    perform (Spark 10000);
+    model()
+)
+;;
+
+perform (Print "Nothing to see here, yet.\n") ;;
