@@ -1,5 +1,20 @@
 effect Sample : float;;
-effect Score  : float -> unit;;
+
+(* non-negative reals represented as logarithms.*)
+type rplus = Exp of float
+let rplus_of_float x =  Exp (log x)
+let rplus_of_int   a =  rplus_of_float(float_of_int a)
+
+let float_of_rplus (Exp x) = exp x
+
+let ( +.. )  = fun x y ->
+  rplus_of_float (
+    float_of_rplus x +. float_of_rplus y
+  )
+let ( *.. )  (Exp x) (Exp y) = Exp (x +. y)
+let ( /.. )  (Exp x) (Exp y) = Exp (x -. y)
+
+effect Score  : rplus -> unit;;
 
 (* bernoulli : float -> bool *)
 let bernoulli p =  (p < perform Sample);;
@@ -7,11 +22,12 @@ let bernoulli p =  (p < perform Sample);;
 let model() =
   let rain      = bernoulli 0.2 in
   let sprinkler = bernoulli 0.1 in
-  let log_liklihood_lawn_wet = match (rain, sprinkler) with
+  let log_liklihood_lawn_wet = rplus_of_float
+                           (match (rain, sprinkler) with
                            | ( true , true ) -> 0.99
                            | ( true , false) -> 0.70
                            | ( false, true ) -> 0.90
-                           | ( false, false) -> 0.01 in
+                           | ( false, false) -> 0.01) in
   let _ = perform (Score log_liklihood_lawn_wet) in
   rain;;
 
@@ -22,11 +38,12 @@ let sampler = handler
 
 let weighted = handler
   | v -> fun r -> (r,v)
-  | effect (Score r1) k -> fun r2 -> k () (r2 +. r1)
-  | finally f -> f 0.
+  | effect (Score r1) k -> fun r2 -> k () (r2 *.. r1)
+  | finally f -> f (Exp 0.)
 ;;
 
 effect Spark : int -> unit;;
+effect Spawn : int -> unit;;
 
 let list_handler = handler
   | v -> [v]
@@ -54,18 +71,83 @@ let rec foldl e f = function
 let aggr rs =
   let rec aggr_aux completed = function
     | [] -> completed
-    | (r,x) :: todo -> let holds,fails = separate (fun (r,a) -> x = a) todo
-                       in aggr_aux ((foldl r (fun s (r,x) -> s +.r) holds,x) :: completed) fails
+    | (r,x) :: todo ->
+                let holds,fails = separate (fun (r,a) -> x = a) todo
+                in aggr_aux ((foldl r (fun s (r,x) -> s *.. r) holds,x)
+                             :: completed)
+                            fails
   in aggr_aux [] rs
 ;;
 
-aggr(
-  with list_handler handle
+let population m =
+  with list_handler handle with weighted handle
+  with handler
+  | v -> v
+  | effect (Spawn n) k ->
+      perform (Score (Exp 0.) /.. (rplus_of_int n));
+      perform (Spark n);
+      k()
+  handle
+    m ()
+;;
+
+let unzip ps =
+  let rec loop left right = function
+  | [] -> (left, right)
+  | (a,b)::ps -> loop (a :: left) (b :: right) ps
+  in loop [] [] (reverse ps)
+;;
+
+let sump = foldl (rplus_of_int 0) (+..)
+;;
+let sumf = foldl (float_of_int 0) (+.)
+;;
+
+let weighted_choice = function
+  | [] -> assert false
+  | pxs ->
+  let (ps, xs) = unzip pxs in
+  let ps = map float_of_rplus ps in
+  let total = sumf ps in
+  let r = total *. perform Sample in
+  let rec loop gasoline (p::ps) (x::xs) =
+    let gasoline = gasoline -. p in
+    if gasoline <= 0.
+    then x
+    else loop gasoline ps xs
+  in loop r ps xs
+;;
+
+let resample m =
+  let pop = m () in
+  let (ps, xs) = unzip pop in
+  let n = length pop in
+  let z = sump ps in
+  if float_of_rplus z > 0.
+  then population
+       (fun _ ->
+       ( perform (Spark n)
+       ; weighted_choice pop
+         (* sub-optimal, recomputes total sum of weights *)
+       ))
+  else pop
+;;
+
+let normalise pop =
+  let total = sump (map fst pop) in
+  perform (Print ("total size is: " ^ to_string (float_of_rplus total) ^ "\n"));
+  map (fun (r,x) -> (r /.. total), x) pop
+;;
+
+let aggregated = aggr(
   with sampler      handle
-  with weighted     handle
-    perform (Spark 10000);
-    model()
-)
+    population (
+      fun _ ->
+        perform (Spark 10);
+        model()
+))
+in perform (Print (to_string aggregated ^ "\n"));
+   normalise aggregated
 ;;
 
 perform (Print "Nothing to see here, yet.\n") ;;
