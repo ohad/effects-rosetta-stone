@@ -103,9 +103,7 @@ let sump = foldl (rplus_of_int 0) (+..)
 let sumf = foldl (float_of_int 0) (+.)
 ;;
 
-let weighted_choice = function
-  | [] -> assert false
-  | pxs ->
+let weighted_choice pxs = (*ASSUME pxs is NON-EMPTY *)
   let (ps, xs) = unzip pxs in
   let ps = map float_of_rplus ps in
   let total = sumf ps in
@@ -119,18 +117,62 @@ let weighted_choice = function
 ;;
 
 let resample m =
-  let pop = m () in
+  let pop = population m in
   let (ps, xs) = unzip pop in
   let n = length pop in
   let z = sump ps in
   if float_of_rplus z > 0.
-  then population
-       (fun _ ->
-       ( perform (Spark n)
+  then ( perform (Spark n)
        ; weighted_choice pop
          (* sub-optimal, recomputes total sum of weights *)
-       ))
-  else pop
+       )
+  else
+    ( perform (Print "Total weight zero!!!")
+    ; perform (Score (Exp neg_infinity))
+    ; snd (hd pop)
+    )
+;;
+
+effect Yield : unit
+;;
+
+let sequential = handler
+| effect (Score r) k ->
+    perform (Score r);
+    perform Yield; k ()
+;;
+
+(* Erroneous! *)
+
+let advance n = handler
+  | v -> fun _ -> v
+  | effect Yield k -> fun n ->
+      if n <= 0
+      then ( perform Yield
+           ; k() n
+           )
+      else k () (n - 1)
+  | finally f -> f n
+
+;;
+
+let finish = handler
+  | v -> v
+  | effect Yield k -> k ()
+
+;;
+
+(* erroneous! *)
+
+let smc k n m =
+  with finish handle
+  (with advance 1 handle
+    resample (fun _ ->
+    perform (Spawn n);
+    m ()
+  ))
+
+
 ;;
 
 let normalise pop =
@@ -139,15 +181,12 @@ let normalise pop =
   map (fun (r,x) -> (r /.. total), x) pop
 ;;
 
-let aggregated = aggr(
-  with sampler      handle
-    population (
-      fun _ ->
-        perform (Spark 10);
-        model()
-))
+let aggregated =
+      aggr(with sampler handle
+      population (fun _ ->
+        smc 10 10 model))
 in perform (Print (to_string aggregated ^ "\n"));
-   normalise aggregated
+   map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
 ;;
 
 perform (Print "Nothing to see here, yet.\n") ;;
