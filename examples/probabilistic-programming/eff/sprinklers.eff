@@ -30,7 +30,7 @@ let model() =
                            | ( false, false) -> 0.01) in
   let _ = perform (Score log_liklihood_lawn_wet) in
   rain;;
-
+(*********************** weighted sampler *************************************)
 let sampler = handler
   | v -> v
   | effect Sample k ->
@@ -42,6 +42,21 @@ let weighted = handler
   | finally f -> f (Exp 0.)
 ;;
 
+
+(* e.g.: *)
+
+let (r,rain)  =
+      with sampler handle
+      with weighted handle
+      model ()
+in print_endline ("Aggregate weight, value =" ^ (to_string (float_of_rplus r, rain)))
+;;
+
+(******************************************************************************)
+
+
+
+(*****************Sequential Monte Carlo **************************************)
 effect Spark : int -> unit;;
 effect Spawn : int -> unit;;
 
@@ -73,11 +88,12 @@ let aggr rs =
     | [] -> completed
     | (r,x) :: todo ->
                 let holds,fails = separate (fun (r,a) -> x = a) todo
-                in aggr_aux ((foldl r (fun s (r,x) -> s *.. r) holds,x)
+                in aggr_aux ((foldl r (fun s (r,x) -> s +.. r) holds,x)
                              :: completed)
                             fails
   in aggr_aux [] rs
 ;;
+
 
 let population m =
   with list_handler handle with weighted handle
@@ -91,6 +107,34 @@ let population m =
     m ()
 ;;
 
+let sump = foldl (rplus_of_int 0) (+..)
+;;
+
+let sumf = foldl (float_of_int 0) (+.)
+;;
+
+let (|>) x f = f x;;
+
+let normalise pop =
+  let total = pop |> map fst |> sump in
+  print_endline ("total size is: " ^ to_string (float_of_rplus total));
+  map (fun (r,x) -> (r /.. total), x) pop
+;;
+
+
+
+let dist  =
+      with sampler handle
+      population (fun _ ->
+      perform (Spawn 30);
+      model ()
+      ) in
+let dist = dist |> aggr |>  normalise
+in print_endline ("Final population:" ^ (to_string (map (fun (r,x) -> (float_of_rplus r), x) dist)))
+;;
+(***************************************************************************)
+
+
 let unzip ps =
   let rec loop left right = function
   | [] -> (left, right)
@@ -98,10 +142,7 @@ let unzip ps =
   in loop [] [] (reverse ps)
 ;;
 
-let sump = foldl (rplus_of_int 0) (+..)
-;;
-let sumf = foldl (float_of_int 0) (+.)
-;;
+assert (unzip [(1,"a"); (2,"b"); (3,"c")] = ([1; 2; 3], ["a"; "b"; "c"]));;
 
 let weighted_choice pxs = (*ASSUME pxs is NON-EMPTY *)
   let (ps, xs) = unzip pxs in
@@ -117,12 +158,13 @@ let weighted_choice pxs = (*ASSUME pxs is NON-EMPTY *)
 ;;
 
 let resample m =
-  let pop = population m in
+  let pop = population m in  (**** Maybe we should pass a population model???  ****)
   let (ps, xs) = unzip pop in
   let n = length pop in
   let z = sump ps in
   if float_of_rplus z > 0.
-  then ( perform (Spark n)
+  then ( perform (Spawn n)
+       ; perform (Score (z /.. rplus_of_int n))
        ; weighted_choice pop
          (* sub-optimal, recomputes total sum of weights *)
        )
@@ -132,7 +174,7 @@ let resample m =
     ; snd (hd pop)
     )
 ;;
-
+(***********************************************************************)
 effect Yield : unit
 ;;
 
@@ -175,16 +217,10 @@ let smc k n m =
 
 ;;
 
-let normalise pop =
-  let total = sump (map fst pop) in
-  perform (Print ("total size is: " ^ to_string (float_of_rplus total) ^ "\n"));
-  map (fun (r,x) -> (r /.. total), x) pop
-;;
-
 let aggregated =
       aggr(with sampler handle
       population (fun _ ->
-        smc 10 10 model))
+        smc 1000 1000 model))
 in perform (Print (to_string aggregated ^ "\n"));
    map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
 ;;
