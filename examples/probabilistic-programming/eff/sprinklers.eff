@@ -34,7 +34,7 @@ let ( /.. )  (Exp x) (Exp y) = Exp (x -. y)
 effect Score  : rplus -> unit;;
 
 (* bernoulli : float -> bool *)
-let bernoulli p =  (p < perform Sample);;
+let bernoulli p =  (p > perform Sample);;
 
 let model() =
   let rain      = bernoulli 0.2 in
@@ -117,7 +117,7 @@ let population m =
   with handler
   | v -> v
   | effect (Spawn n) k ->
-      perform (Score (Exp 0.) /.. (rplus_of_int n));
+      perform (Score ((Exp 0.) /.. (rplus_of_int n)));
       perform (Spark n);
       k()
   handle
