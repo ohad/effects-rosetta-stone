@@ -11,6 +11,23 @@ let ( +.. )  = fun x y ->
   rplus_of_float (
     float_of_rplus x +. float_of_rplus y
   )
+
+(* Probably better to use this one instead, based on the equation:
+
+  log (e^x + e^y) = log(e^x (1 + e^(y-x)) = x + log1p(e^(y - x))
+
+  where log1p u = log (1 + p)
+ *)
+let ( +... ) =
+  let log_plus x y = ( x +. log1p (exp (y -. x))) in
+  fun (Exp x) (Exp y) ->
+  if (x < y)
+  then Exp (log_plus y x)
+  else Exp (log_plus x y)
+
+  
+
+
 let ( *.. )  (Exp x) (Exp y) = Exp (x +. y)
 let ( /.. )  (Exp x) (Exp y) = Exp (x -. y)
 
@@ -174,6 +191,27 @@ let resample m =
     ; snd (hd pop)
     )
 ;;
+
+
+(* naive inference using population --- must be known to someone
+
+   s: size of population, ie., the number of particle
+   k: number of resamples
+
+
+*)
+let popular_inference s k m =
+  let rec loop k m =
+    if (k <= 0)
+    then  fun () ->
+          (perform (Spawn s)
+          ; m ())
+    else  fun () -> resample (loop (k-1) m )
+  in loop k m ()
+
+
+       
+
 (***********************************************************************)
 effect Yield : unit
 ;;
@@ -191,7 +229,7 @@ let advance n = handler
   | effect Yield k -> fun n ->
       if n <= 0
       then ( perform Yield
-           ; k() n
+           ; k() 0
            )
       else k () (n - 1)
   | finally f -> f n
@@ -207,22 +245,28 @@ let finish = handler
 (* erroneous! *)
 
 let smc k n m =
-  with finish handle
-  (with advance 1 handle
-    resample (fun _ ->
-    perform (Spawn n);
-    m ()
-  ))
+with finish handle
+  with advance 1 handle
+         resample (fun _ -> 
+           (with advance 1 handle
+                   resample (fun _ ->
+                     perform (Spawn n);
+                     m ()
+                   )
+           )
+         )
 
 
 ;;
 
 let aggregated =
-      aggr(with sampler handle
-      population (fun _ ->
-        smc 1000 1000 model))
-in perform (Print (to_string aggregated ^ "\n"));
-   map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
+  aggr(with sampler handle
+              population
+              (fun _ ->
+                popular_inference 1000 4 model)
+       ) in
+    perform (Print (to_string aggregated ^ "\n"));
+    map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
 ;;
 
 perform (Print "Nothing to see here, yet.\n") ;;
