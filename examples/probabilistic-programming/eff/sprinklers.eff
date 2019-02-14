@@ -68,6 +68,22 @@ let rain_model : bool model = fun () ->
   score likelihood_wet_lawn;
   rain
 
+let whatever_model : int model = fun () ->
+  let p1 = bernoulli_sample 0.2 in
+  let p2 = bernoulli_sample 0.1 in
+  if p1 && p2 then
+    (score (Exp 0.8);
+    let p3 = bernoulli_sample 0.5 in
+    if p3 then
+      (score (Exp 0.2); 3)
+    else
+      (score (Exp 0.3); 2))
+  else if p1 then
+    (* This one should be droped by the SMC. *)
+    (score (Exp -1000000.); score (Exp 1000000.); score (Exp 0.1); 1)
+  else
+    (score (Exp 0.4); 0)
+
 (* ---- Testing ---- *)
 ;;(*
 let (w, rain) =
@@ -120,7 +136,7 @@ let normalise (pop : 'a list_dist) : 'a list_dist =
 (* ---- Test ---- *)
 ;;
 let rain_pop_test =
-    populate 5000 rain_model
+    populate 5000 whatever_model
 in
 let result = 
   rain_pop_test 
@@ -168,7 +184,46 @@ let populate_and_resample pop_size k (model : 'a model) : 'a list_dist =
   resampler k list_dist
 
 ;;
-let aggregated = aggregate (populate_and_resample 200 2 rain_model) in
+let aggregated = aggregate (populate_and_resample 500 2 whatever_model) in
+perform (Print (to_string aggregated ^ "\n"));
+map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
+;;
+
+(* -------------------------------------------------------------------------- *)
+(* ---- SMC ---- *)
+
+type 'a thunky = Done of 'a | Thunk of unit -> 'a thunky
+
+let yield_on_score = handler
+  | effect (Score w) k -> (score w; Thunk k)
+  | v -> Done v
+
+(* Dont like the handler positioning. *)
+let smc pop_size k (model : 'a model) : 'a list_dist =
+  let advance = function
+    | w, Done v -> (w, Done v)
+    | w, Thunk t -> with weighted_branches handle (score w; t ())
+  in
+  let rec finalize = function
+    | w, Done v -> (w, v)
+    | todo -> finalize (advance todo)
+  in
+  let thunk_model () = with yield_on_score handle model () in
+  let list_dist = populate pop_size thunk_model in
+  let rec resampler i list_dist =
+    if (i <= 0) then
+      map finalize list_dist
+    else  
+      list_dist |> resample |> map advance |> resampler (i-1)
+  in
+  with random_sampler handle
+  resampler k list_dist
+
+(* -------------------------------------------------------------------------- *)
+(* ---- Test ---- *)
+
+;;
+let aggregated = aggregate (smc 500 2 whatever_model) in
 perform (Print (to_string aggregated ^ "\n"));
 map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
 ;;
