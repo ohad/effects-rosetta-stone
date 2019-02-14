@@ -1,272 +1,174 @@
-effect Sample : float;;
+(* ---- Auxiliary functions. ---- *)
+let (|>) x f = f x
 
-(* non-negative reals represented as logarithms.*)
+let separate pred =
+  let rec loop holds fails = function
+  | [] -> (reverse holds, reverse fails)
+  | x :: xs -> 
+      if pred x then 
+        loop (x :: holds) fails xs
+      else
+        loop holds (x :: fails) xs
+  in loop [] []
+
+(* -------------------------------------------------------------------------- *)
+(* ---- Non-negative reals represented as logarithms. ---- *)
 type rplus = Exp of float
 let rplus_of_float x =  Exp (log x)
-let rplus_of_int   a =  rplus_of_float(float_of_int a)
-
+let rplus_of_int a =  rplus_of_float(float_of_int a)
 let float_of_rplus (Exp x) = exp x
 
-let ( +.. )  = fun x y ->
-  rplus_of_float (
-    float_of_rplus x +. float_of_rplus y
-  )
-
-(* Probably better to use this one instead, based on the equation:
-
-  log (e^x + e^y) = log(e^x (1 + e^(y-x)) = x + log1p(e^(y - x))
-
-  where log1p u = log (1 + p)
- *)
-let ( +... ) =
+let ( +.. ) =
   let log_plus x y = ( x +. log1p (exp (y -. x))) in
   fun (Exp x) (Exp y) ->
   if (x < y)
   then Exp (log_plus y x)
   else Exp (log_plus x y)
-
   
+let ( *.. ) (Exp x) (Exp y) = Exp (x +. y)
+let ( /.. ) (Exp x) (Exp y) = Exp (x -. y)
+let ( <=. ) (Exp x) (Exp y) = x <= y
 
+(* -------------------------------------------------------------------------- *)
 
-let ( *.. )  (Exp x) (Exp y) = Exp (x +. y)
-let ( /.. )  (Exp x) (Exp y) = Exp (x -. y)
+(* ---- Effects and types ---- *)
+effect Sample : float
+effect Score : rplus -> unit
 
-effect Score  : rplus -> unit;;
+type 'a list_dist = (rplus * 'a) list 
+type 'a model = unit -> 'a (* unit -> 'a!{Sample, Score} *)
 
-(* bernoulli : float -> bool *)
-let bernoulli p =  (p > perform Sample);;
+(* ---- Random sampler and weighted branches ---- *)
+let score (log_likelihood : rplus) : unit = perform (Score log_likelihood)
 
-let model() =
-  let rain      = bernoulli 0.2 in
-  let sprinkler = bernoulli 0.1 in
-  let log_liklihood_lawn_wet = rplus_of_float
-                           (match (rain, sprinkler) with
-                           | ( true , true ) -> 0.99
-                           | ( true , false) -> 0.70
-                           | ( false, true ) -> 0.90
-                           | ( false, false) -> 0.01) in
-  let _ = perform (Score log_liklihood_lawn_wet) in
-  rain;;
-(*********************** weighted sampler *************************************)
-let sampler = handler
+let weighted_branches = handler
+  | effect (Score w) k -> (fun w' -> continue k () (w' *.. w))
+  | v -> (fun w -> (w,v))
+  | finally prog -> prog (Exp 0.)
+
+let random_sampler = handler
+  | effect Sample k -> continue k (perform (RandomFloat 1.))
   | v -> v
-  | effect Sample k ->
-     k (perform (RandomFloat 1.));;
 
-let weighted = handler
-  | v -> fun r -> (r,v)
-  | effect (Score r1) k -> fun r2 -> k () (r2 *.. r1)
-  | finally f -> f (Exp 0.)
-;;
+let bernoulli_sample (p : float) : bool =  (p > perform Sample);;
 
+(* ---- Rain model for testing. ---- *)
 
-(* e.g.: *)
+let rain_model : bool model = fun () ->
+  let rain = bernoulli_sample 0.2 in
+  let sprinkler = bernoulli_sample 0.1 in
+  let likelihood_wet_lawn = 
+    (match (rain, sprinkler) with
+    | ( true , true ) -> 0.99
+    | ( true , false) -> 0.70
+    | ( false, true ) -> 0.90
+    | ( false, false) -> 0.01
+    ) |> rplus_of_float
+  in
+  score likelihood_wet_lawn;
+  rain
 
-let (r,rain)  =
-      with sampler handle
-      with weighted handle
-      model ()
-in print_endline ("Aggregate weight, value =" ^ (to_string (float_of_rplus r, rain)))
-;;
+(* ---- Testing ---- *)
+;;(*
+let (w, rain) =
+  with random_sampler handle
+  with weighted_branches handle
+  rain_model ()
+in
+print_endline (
+  "Single run test : weight, value =" ^ (to_string (float_of_rplus w, rain))
+)
+;;*)
+(* -------------------------------------------------------------------------- *)
 
-(******************************************************************************)
+(* ---- Sequential Monte Carlo ---- *)
 
+let populate (k : int) (model : 'a model) : 'a list_dist =
+  let rec loop i acc =
+    if i < k then
+      let result = 
+        with random_sampler handle
+        with weighted_branches handle
+          score (Exp 0. /.. rplus_of_int k);
+          model ()
+      in
+      loop (i + 1) (result :: acc)
+    else
+      acc
+  in 
+  loop 0 []
 
+let aggregate (pop : 'a list_dist) : 'a list_dist =
+  let rec aggr_aux acc = function
+    | [] -> acc
+    | (w, x) :: xs ->
+      let holds, fails = separate (fun (w, a) -> x = a) xs in
+      let new_w = fold_left (fun s (w, _) -> s +.. w) w holds in 
+      aggr_aux ((new_w, x) :: acc) fails
+  in 
+  aggr_aux [] pop
 
-(*****************Sequential Monte Carlo **************************************)
-effect Spark : int -> unit;;
-effect Spawn : int -> unit;;
+let sum_weights (list_dist : 'a list_dist) : rplus = 
+  fold_left (fun acc (w, x) -> acc +.. w) (rplus_of_int 0) list_dist
 
-let list_handler = handler
-  | v -> [v]
-  | effect (Spark n) k ->
-      let rec loop i res =
-         if i < n
-         then loop (i+1) ((k ()) @ res)
-         else res
-      in loop 0 []
-;;
-
-let separate pred =
-  let rec loop holds fails = function
-  | [] -> (reverse holds, reverse fails)
-  | x :: rest -> if pred x
-                 then loop (x :: holds) fails rest
-                 else loop holds (x :: fails) rest
-  in loop [] []
-
-let rec foldl e f = function
-                    | [] -> e
-                    | x :: xs -> foldl (f e x) f xs
-;;
-
-let aggr rs =
-  let rec aggr_aux completed = function
-    | [] -> completed
-    | (r,x) :: todo ->
-                let holds,fails = separate (fun (r,a) -> x = a) todo
-                in aggr_aux ((foldl r (fun s (r,x) -> s +.. r) holds,x)
-                             :: completed)
-                            fails
-  in aggr_aux [] rs
-;;
-
-
-let population m =
-  with list_handler handle with weighted handle
-  with handler
-  | v -> v
-  | effect (Spawn n) k ->
-      perform (Score ((Exp 0.) /.. (rplus_of_int n)));
-      perform (Spark n);
-      k()
-  handle
-    m ()
-;;
-
-let sump = foldl (rplus_of_int 0) (+..)
-;;
-
-let sumf = foldl (float_of_int 0) (+.)
-;;
-
-let (|>) x f = f x;;
-
-let normalise pop =
-  let total = pop |> map fst |> sump in
+let normalise (pop : 'a list_dist) : 'a list_dist =
+  let total = sum_weights pop in
   print_endline ("total size is: " ^ to_string (float_of_rplus total));
   map (fun (r,x) -> (r /.. total), x) pop
+
+(* -------------------------------------------------------------------------- *)
+(* ---- Test ---- *)
+;;
+let rain_pop_test =
+    populate 5000 rain_model
+in
+let result = 
+  rain_pop_test 
+  |> aggregate 
+  |> normalise 
+  |> map (fun (w,x) -> (float_of_rplus w), x)
+in print_endline ("Final population:" ^ (to_string result))
 ;;
 
 
+(* -------------------------------------------------------------------------- *)
+(* ---- Resampling ---- *)
 
-let dist  =
-      with sampler handle
-      population (fun _ ->
-      perform (Spawn 30);
-      model ()
-      ) in
-let dist = dist |> aggr |>  normalise
-in print_endline ("Final population:" ^ (to_string (map (fun (r,x) -> (float_of_rplus r), x) dist)))
-;;
-(***************************************************************************)
+let weighted_choice (list_dist : 'a list_dist) : 'a = 
+  (*ASSUME pxs is NON-EMPTY *)
+  let total_w = sum_weights list_dist in
+  let total_fuel = (float_of_rplus total_w) *. (perform Sample) in
+  let rec choose fuel ((w, x) :: wxs) =
+    let fuel = fuel -. float_of_rplus w in
+    if fuel <= 0. then x else choose fuel wxs
+  in
+  choose total_fuel list_dist
 
-
-let unzip ps =
-  let rec loop left right = function
-  | [] -> (left, right)
-  | (a,b)::ps -> loop (a :: left) (b :: right) ps
-  in loop [] [] (reverse ps)
-;;
-
-assert (unzip [(1,"a"); (2,"b"); (3,"c")] = ([1; 2; 3], ["a"; "b"; "c"]));;
-
-let weighted_choice pxs = (*ASSUME pxs is NON-EMPTY *)
-  let (ps, xs) = unzip pxs in
-  let ps = map float_of_rplus ps in
-  let total = sumf ps in
-  let r = total *. perform Sample in
-  let rec loop gasoline (p::ps) (x::xs) =
-    let gasoline = gasoline -. p in
-    if gasoline <= 0.
-    then x
-    else loop gasoline ps xs
-  in loop r ps xs
-;;
-
-let resample m =
-  let pop = population m in  (**** Maybe we should pass a population model???  ****)
-  let (ps, xs) = unzip pop in
-  let n = length pop in
-  let z = sump ps in
-  if float_of_rplus z > 0.
-  then ( perform (Spawn n)
-       ; perform (Score (z /.. rplus_of_int n))
-       ; weighted_choice pop
-         (* sub-optimal, recomputes total sum of weights *)
-       )
-  else
-    ( perform (Print "Total weight zero!!!")
-    ; perform (Score (Exp neg_infinity))
-    ; snd (hd pop)
-    )
-;;
+let resample (list_dist : 'a list_dist) : 'a list_dist =
+  let n = length list_dist in
+  let total_w = sum_weights list_dist in
+  let resample_model : 'a model = fun () -> (
+    score total_w;
+    weighted_choice list_dist )
+  in
+  populate n resample_model 
 
 
-(* naive inference using population --- must be known to someone
+(* -------------------------------------------------------------------------- *)
+(* ---- Test ---- *)
 
-   s: size of population, ie., the number of particle
-   k: number of resamples
-
-
-*)
-let popular_inference s k m =
-  let rec loop k m =
-    if (k <= 0)
-    then  fun () ->
-          (perform (Spawn s)
-          ; m ())
-    else  fun () -> resample (loop (k-1) m )
-  in loop k m ()
-
-
-       
-
-(***********************************************************************)
-effect Yield : unit
-;;
-
-let sequential = handler
-| effect (Score r) k ->
-    perform (Score r);
-    perform Yield; k ()
-;;
-
-(* Erroneous! *)
-
-let advance n = handler
-  | v -> fun _ -> v
-  | effect Yield k -> fun n ->
-      if n <= 0
-      then ( perform Yield
-           ; k() 0
-           )
-      else k () (n - 1)
-  | finally f -> f n
+let populate_and_resample pop_size k (model : 'a model) : 'a list_dist =
+  let list_dist = populate pop_size model in
+  let rec resampler i list_dist =
+    if (i <= 0) then
+      list_dist
+    else  
+      resampler (i - 1) (resample list_dist)
+  in 
+  resampler k list_dist
 
 ;;
-
-let finish = handler
-  | v -> v
-  | effect Yield k -> k ()
-
+let aggregated = aggregate (populate_and_resample 200 2 rain_model) in
+perform (Print (to_string aggregated ^ "\n"));
+map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
 ;;
-
-(* erroneous! *)
-
-let smc k n m =
-with finish handle
-  with advance 1 handle
-         resample (fun _ -> 
-           (with advance 1 handle
-                   resample (fun _ ->
-                     perform (Spawn n);
-                     m ()
-                   )
-           )
-         )
-
-
-;;
-
-let aggregated =
-  aggr(with sampler handle
-              population
-              (fun _ ->
-                popular_inference 1000 4 model)
-       ) in
-    perform (Print (to_string aggregated ^ "\n"));
-    map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
-;;
-
-perform (Print "Nothing to see here, yet.\n") ;;
