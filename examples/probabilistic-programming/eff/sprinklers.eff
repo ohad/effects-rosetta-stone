@@ -42,7 +42,7 @@ type 'a model = unit -> 'a (* ! Sample, Score *)
 let score (log_likelihood : rplus) : unit (* ! Score *)
   = perform (Score log_likelihood)
 
-let weighted_branches : 'a (*! Score, e*) => rplus* 'a  (*! e*)
+let weighted : 'a (*! Score, e*) => rplus * 'a  (*! e*)
   = handler 
   | effect (Score w) k -> (fun w' -> continue k () (w' *.. w))
   | v -> (fun w -> (w,v))
@@ -92,7 +92,7 @@ let whatever_model : int model = fun () ->
 ;;(*
 let (w, rain) =
   with random_sampler handle
-  with weighted_branches handle
+  with weighted handle
   rain_model ()
 in
 print_endline (
@@ -107,12 +107,11 @@ print_endline (
   Does it affect performance?
 *)
 let populate (k : int) (model : 'a model (*! Score, Sample, e*))
-    : 'a list_dist (*! e *) =
+    : 'a list_dist (*! Sample, e *) =
   let rec loop i acc =
     if i < k then
       let result = 
-        with random_sampler handle
-        with weighted_branches handle
+        with weighted handle
           score (Exp 0. /.. rplus_of_int k);
           model ()
       in
@@ -144,7 +143,8 @@ let normalise (pop : 'a list_dist) : 'a list_dist =
 (* ---- Test ---- *)
 ;;
 let rain_pop_test =
-    populate 5000 whatever_model
+  with random_sampler handle
+  populate 5000 whatever_model
 in
 let result = 
   rain_pop_test 
@@ -169,9 +169,7 @@ let weighted_choice (list_dist : 'a list_dist) : 'a (*! Sample *)
   in
   choose total_fuel list_dist
 
-(* Should propogate Sampling to enclosing handler (i.e., dirt should
-   be {Score, Sample} *)
-let resample (list_dist : 'a list_dist) : 'a list_dist (*! <<pure>> *)
+let resample (list_dist : 'a list_dist) : 'a list_dist (*! Sample *)
   =
   let n = length list_dist in
   let total_w = sum_weights list_dist in
@@ -185,7 +183,8 @@ let resample (list_dist : 'a list_dist) : 'a list_dist (*! <<pure>> *)
 (* -------------------------------------------------------------------------- *)
 (* ---- Test ---- *)
 
-let populate_and_resample pop_size k (model : 'a model) : 'a list_dist =
+let populate_and_resample pop_size k (model : 'a model) 
+    : 'a list_dist (* !Sample *) =
   let list_dist = populate pop_size model in
   let rec resampler i list_dist =
     if (i <= 0) then
@@ -196,6 +195,7 @@ let populate_and_resample pop_size k (model : 'a model) : 'a list_dist =
   resampler k list_dist
 
 ;;
+with random_sampler handle
 let aggregated = aggregate (populate_and_resample 500 2 whatever_model) in
 perform (Print (to_string aggregated ^ "\n"));
 map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
@@ -214,7 +214,7 @@ let yield_on_score = handler
 let smc pop_size k (model : 'a model) : 'a list_dist =
   let advance = function
     | w, Done v -> (w, Done v)
-    | w, Thunk t -> with weighted_branches handle (score w; t ())
+    | w, Thunk t -> with weighted handle (score w; t ())
   in
   let rec finalize = function
     | w, Done v -> (w, v)
@@ -228,13 +228,13 @@ let smc pop_size k (model : 'a model) : 'a list_dist =
     else  
       list_dist |> resample |> map advance |> resampler (i-1)
   in
-  with random_sampler handle
   resampler k list_dist
 
 (* -------------------------------------------------------------------------- *)
 (* ---- Test ---- *)
 
 ;;
+with random_sampler handle
 let aggregated = aggregate (smc 500 2 whatever_model) in
 perform (Print (to_string aggregated ^ "\n"));
 map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
