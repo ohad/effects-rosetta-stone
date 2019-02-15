@@ -33,24 +33,28 @@ let ( <=. ) (Exp x) (Exp y) = x <= y
 
 (* ---- Effects and types ---- *)
 effect Sample : float
-effect Score : rplus -> unit
+effect Score  : rplus -> unit
 
 type 'a list_dist = (rplus * 'a) list 
-type 'a model = unit -> 'a (* unit -> 'a!{Sample, Score} *)
+type 'a model = unit -> 'a (* ! Sample, Score *)
 
 (* ---- Random sampler and weighted branches ---- *)
-let score (log_likelihood : rplus) : unit = perform (Score log_likelihood)
+let score (log_likelihood : rplus) : unit (* ! Score *)
+  = perform (Score log_likelihood)
 
-let weighted_branches = handler
+let weighted_branches : 'a (*! Score, e*) => rplus* 'a  (*! e*)
+  = handler 
   | effect (Score w) k -> (fun w' -> continue k () (w' *.. w))
   | v -> (fun w -> (w,v))
   | finally prog -> prog (Exp 0.)
 
-let random_sampler = handler
+let random_sampler : 'a (* ! Sample *) => 'a (*! RandomFloat *)
+  = handler
   | effect Sample k -> continue k (perform (RandomFloat 1.))
   | v -> v
 
-let bernoulli_sample (p : float) : bool =  (p > perform Sample);;
+let bernoulli_sample (p : float) : bool (*! Sample *)
+  =  (p > perform Sample);;
 
 (* ---- Rain model for testing. ---- *)
 
@@ -99,7 +103,11 @@ print_endline (
 
 (* ---- Sequential Monte Carlo ---- *)
 
-let populate (k : int) (model : 'a model) : 'a list_dist =
+(*TODO: refactor the random sampler out
+  Does it affect performance?
+*)
+let populate (k : int) (model : 'a model (*! Score, Sample, e*))
+    : 'a list_dist (*! e *) =
   let rec loop i acc =
     if i < k then
       let result = 
@@ -150,8 +158,9 @@ in print_endline ("Final population:" ^ (to_string result))
 (* -------------------------------------------------------------------------- *)
 (* ---- Resampling ---- *)
 
-let weighted_choice (list_dist : 'a list_dist) : 'a = 
-  (*ASSUME pxs is NON-EMPTY *)
+let weighted_choice (list_dist : 'a list_dist) : 'a (*! Sample *)
+  = 
+  (*ASSUME list_dist is NON-EMPTY *)
   let total_w = sum_weights list_dist in
   let total_fuel = (float_of_rplus total_w) *. (perform Sample) in
   let rec choose fuel ((w, x) :: wxs) =
@@ -160,7 +169,10 @@ let weighted_choice (list_dist : 'a list_dist) : 'a =
   in
   choose total_fuel list_dist
 
-let resample (list_dist : 'a list_dist) : 'a list_dist =
+(* Should propogate Sampling to enclosing handler (i.e., dirt should
+   be {Score, Sample} *)
+let resample (list_dist : 'a list_dist) : 'a list_dist (*! <<pure>> *)
+  =
   let n = length list_dist in
   let total_w = sum_weights list_dist in
   let resample_model : 'a model = fun () -> (
@@ -227,3 +239,5 @@ let aggregated = aggregate (smc 500 2 whatever_model) in
 perform (Print (to_string aggregated ^ "\n"));
 map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
 ;;
+
+(* TODO: Think about a handler for densitity-based inference.  *)
