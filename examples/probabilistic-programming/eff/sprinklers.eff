@@ -76,17 +76,17 @@ let whatever_model : int model = fun () ->
   let p1 = bernoulli_sample 0.2 in
   let p2 = bernoulli_sample 0.1 in
   if p1 && p2 then
-    (score (Exp 0.8);
+    (score (Exp 1.);
     let p3 = bernoulli_sample 0.5 in
     if p3 then
-      (score (Exp 0.2); 3)
+      (score (Exp 3.); 3)
     else
-      (score (Exp 0.3); 2))
+      (score (Exp 2.); 2))
   else if p1 then
     (* This one should be droped by the SMC. *)
-    (score (Exp -1000000.); score (Exp 1000000.); score (Exp 0.1); 1)
+    (score (Exp -1000000.); score (Exp 1000000.); score (Exp 1.); 1)
   else
-    (score (Exp 0.4); 0)
+    (score (Exp -1.); 0)
 
 (* ---- Testing ---- *)
 ;;(*
@@ -204,40 +204,44 @@ map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
 (* -------------------------------------------------------------------------- *)
 (* ---- SMC ---- *)
 
-type 'a thunky = Done of 'a | Thunk of unit -> 'a thunky
+type 'a thunk = unit -> 'a
 
-let yield_on_score = handler
-  | effect (Score w) k -> (score w; Thunk k)
-  | v -> Done v
+(* Will thunks get bloated after many 'yields'? *)
+let yield_on_score : 'a => 'a thunk = handler
+  | effect (Score w) k -> (score w; fun () -> (k ()) ())
+  | v -> fun () -> v
 
-(* Dont like the handler positioning. *)
-let smc pop_size k (model : 'a model) : 'a list_dist =
-  let advance = function
-    | w, Done v -> (w, Done v)
-    | w, Thunk t -> with weighted handle (score w; t ())
+let advance (thunk_list : 'a thunk list_dist) 
+    : 'a thunk list_dist (* ! Sample *) =
+  let poke (w, t) =
+    with weighted handle
+    (score w ; with yield_on_score handle t ())
   in
-  let rec finalize = function
-    | w, Done v -> (w, v)
-    | todo -> finalize (advance todo)
-  in
-  let thunk_model () = with yield_on_score handle model () in
-  let list_dist = populate pop_size thunk_model in
-  let rec resampler i list_dist =
-    if (i <= 0) then
-      map finalize list_dist
-    else  
-      list_dist |> resample |> map advance |> resampler (i-1)
-  in
-  resampler k list_dist
+  map poke thunk_list
 
-(* -------------------------------------------------------------------------- *)
-(* ---- Test ---- *)
+let finalize (thunk_list : 'a thunk list_dist) : 'a list_dist (* ! Sample *) =
+  let poke (w, t) =
+    with weighted handle
+    (score w; t ())
+  in
+  map poke thunk_list
+
+let test_smc (n : int) (r : int) (model : 'a model)
+    : 'a list_dist (* ! Sample *) =
+  (* I wrote this just to make sure that the functions work correctly. *)
+  let pop = populate n (fun () -> with yield_on_score handle model ()) in
+  let rec loop i pop =
+    if i < r then
+      pop |> resample |> advance |> loop (i + 1)
+    else
+      finalize pop
+  in 
+  loop 0 pop
+
 
 ;;
 with random_sampler handle
-let aggregated = aggregate (smc 500 2 whatever_model) in
+let aggregated = aggregate (test_smc 500 2 whatever_model) in
 perform (Print (to_string aggregated ^ "\n"));
 map (fun (Exp w,x) -> (exp w, x)) (normalise aggregated)
 ;;
-
-(* TODO: Think about a handler for densitity-based inference.  *)
